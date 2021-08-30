@@ -9,7 +9,8 @@ var Engine = function(server, options) {
   this._disconnected = false;
   var gc               = this._options.gc       || this.DEFAULT_GC,
       client           = this._options.client,
-      subscriberClient = this._options.subscriberClient;
+      subscriberClient = this._options.subscriberClient,
+      writeOnly        = this._options.writeOnly;
 
   this._ns  = this._options.namespace || '';
 
@@ -24,10 +25,12 @@ var Engine = function(server, options) {
     this._redis = new RedisClass(this._options.redisConnectionOptions);
   }
 
-  if (subscriberClient) {
-    this._subscriber = subscriberClient;
-  } else {
-    this._subscriber = new RedisClass(this._options.redisConnectionOptions);
+  if (!writeOnly) {
+    if (subscriberClient) {
+      this._subscriber = subscriberClient;
+    } else {
+      this._subscriber = new RedisClass(this._options.redisConnectionOptions);
+    }
   }
 
 
@@ -37,12 +40,15 @@ var Engine = function(server, options) {
   this._clientsKey = this._ns + '{shared}/clients';
 
   var self = this;
-  this._subscriber.subscribe(this._messageChannel);
-  this._subscriber.subscribe(this._closeChannel);
-  this._subscriber.on('message', function(topic, message) {
-    if (topic === self._messageChannel) self.emptyQueue(message);
-    if (topic === self._closeChannel)   self._server.trigger('close', message);
-  });
+
+  if (this._subscriber) {
+    this._subscriber.subscribe(this._messageChannel);
+    this._subscriber.subscribe(this._closeChannel);
+    this._subscriber.on('message', function(topic, message) {
+      if (topic === self._messageChannel) self.emptyQueue(message);
+      if (topic === self._closeChannel)   self._server.trigger('close', message);
+    });
+  }
 
   this._gc = setInterval(function() { self.gc(); }, gc * 1000);
 };
@@ -59,10 +65,17 @@ Engine.prototype = {
     this._disconnected = true;
     clearInterval(this._gc);
 
-    return Promise.all([
+    const actions = [
       this._redis.disconnect(),
-      this._subscriber.disconnect()
-    ])
+    ];
+
+    if (this._subscriber) {
+      actions.push(
+        this._subscriber.disconnect()
+      );
+    }
+
+    return Promise.all(actions)
     .nodeify(function(err) {
       if (err) console.error(err.stack);
     });
