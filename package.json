@@ -17,17 +17,17 @@
     "ioredis": "^4.19.4"
   },
   "devDependencies": {
-    "jstest": ""
+    "jstest": "*"
   },
   "scripts": {
     "test": "node spec/runner.js"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/orianbsilva/faye-ioredis.git"
+    "url": "git+https://github.com/PINE-Events/faye-ioredis.git"
   },
   "bugs": {
-    "url": "https://github.com/orianbsilva/faye-ioredis/issues"
+    "url": "https://github.com/PINE-Events/faye-ioredis/issues"
   },
-  "homepage": "https://github.com/orianbsilva/faye-ioredis#readme"
+  "homepage": "https://github.com/PINE-Events/faye-ioredis#readme"
 }
