@@ -111,11 +111,22 @@ Engine.prototype = {
   },
 
   clientExists: function(clientId, callback, context) {
-    var cutoff = new Date().getTime() - (1000 * 1.6 * this._server.timeout);
-
-    this._redis.zscore(this._clientsKey, clientId, function(error, score) {
-      callback.call(context, parseInt(score, 10) > cutoff);
+    this._clientExists(clientId).then((exists) => {
+      callback.call(context, exists);
     });
+  },
+
+  _clientExists: async function(clientId) {
+    const score = await this._redis.zscore(this._clientsKey, clientId);
+    return !this._clientExpired(score);
+  },
+
+  _clientExpired: function(score) {
+    if (!score)
+      return true;
+
+    const cutoff = new Date().getTime() - (1000 * 1.6 * this._server.timeout);
+    return parseInt(score, 10) <= cutoff;
   },
 
   destroyClient: function(clientId, callback, context) {
@@ -210,37 +221,31 @@ Engine.prototype = {
   publish: function(message, channels) {
     this._server.debug('Publishing message ?', message);
 
-    var jsonMessage = JSON.stringify(message),
-        keys        = channels.map(this._channelKey, this);
+    const jsonMessage = JSON.stringify(message),
+          keys        = channels.map(this._channelKey, this);
 
     this._server.trigger('publish', message.clientId, message.channel, message.data);
 
-    return this._redis.sunion(keys)
-      .bind(this)
-      .then(function(clients) {
-        if (!clients || !clients.length) return;
+    return this._redis.sunion(keys).then(async (clients) => {
+      if (!clients || !clients.length) return;
 
-        return Promise.map(clients, function(clientId) {
-            var queue = this._clientMessagesKey(clientId);
-            this._server.debug('Queueing for client ?: ?', clientId, message);
+      for (let clientId of clients) {
+        const queue = this._clientMessagesKey(clientId);
+        this._server.debug('Queueing for client ?: ?', clientId, message);
 
-            return this._redis.rpush(queue, jsonMessage);
-            // TODO: figure out what to do with this
-            // this.clientExists(clientId, function(exists) {
-            //   if (!exists) this._redis.del(queue);
-            // });
-          }.bind(this))
-          .bind(this)
-          .then(function() {
-            var pipeline = this._redis.pipeline();
-            var messageChannel = this._messageChannel;
-            clients.forEach(function(clientId) {
-              pipeline.publish(messageChannel, clientId);
-            });
+        const pipeline = this._redis.pipeline();
 
-            return pipeline.exec();
-          });
-      });
+        pipeline.rpush(queue, jsonMessage);
+        pipeline.publish(this._messageChannel, clientId);
+        pipeline.zscore(this._clientsKey, clientId);
+
+        const res = await pipeline.exec();
+        const clientScore = res[2] && res[2][1];
+
+        if (typeof clientScore !== 'undefined' && (clientScore === null || this._clientExpired(clientScore)))
+            await this._redis.del(queue);
+      }
+    });
   },
 
   emptyQueue: function(clientId) {
