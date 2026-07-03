@@ -1,8 +1,6 @@
 /* jshint node:true */
 'use strict';
 
-var Promise = require('bluebird');
-
 var Engine = function(server, options) {
   this._server  = server;
   this._options = options || {};
@@ -75,38 +73,37 @@ Engine.prototype = {
       );
     }
 
-    return Promise.all(actions)
-    .nodeify(function(err) {
+    return Promise.all(actions).catch(function(err) {
       if (err) console.error(err.stack);
+      throw err;
     });
 
   },
 
-  _newClientId: function() {
+  _newClientId: async function() {
     var clientId = this._server.generateId();
-    return this._redis.zscore(this._clientsKey, clientId)
-      .bind(this)
-      .then(function(timeout) {
-        if (timeout !== null) return this._newClientId();
-        return clientId;
-      });
+    var timeout = await this._redis.zscore(this._clientsKey, clientId);
+    if (timeout !== null) return this._newClientId();
+    return clientId;
   },
 
   createClient: function(callback, context) {
     return this._newClientId()
-      .bind(this)
-      .then(function(clientId) {
-        return this._updateClientTTL(clientId)
-          .bind(this)
-          .then(function() {
-            this._server.debug('Created new client ?', clientId);
-            this._server.trigger('handshake', clientId);
-            return clientId;
-          });
+      .then((clientId) => {
+        return Promise.resolve(this._updateClientTTL(clientId)).then(() => {
+          this._server.debug('Created new client ?', clientId);
+          this._server.trigger('handshake', clientId);
+          return clientId;
+        });
       })
-      .nodeify(function(err, clientId) {
+      .then((clientId) => {
+        if (callback) callback.call(context, clientId);
+        return clientId;
+      })
+      .catch((err) => {
         if (err) console.error(err.stack);
-        callback.call(context, clientId);
+        if (callback) callback.call(context);
+        throw err;
       });
   },
 
@@ -129,50 +126,48 @@ Engine.prototype = {
     return parseInt(score, 10) <= cutoff;
   },
 
-  destroyClient: function(clientId, callback, context) {
-    return this._redis.smembers(this._clientChannelsKey(clientId))
-      .bind(this)
-      .then(function(channels) {
-        var multiClient = this._redis.multi();
+  destroyClient: async function(clientId, callback, context) {
+    try {
+      var channels = await this._redis.smembers(this._clientChannelsKey(clientId));
+      var multiClient = this._redis.multi();
 
-        channels.forEach(function(channel) {
-          multiClient.srem(this._clientChannelsKey(clientId), channel);
-        }, this);
+      channels.forEach(function(channel) {
+        multiClient.srem(this._clientChannelsKey(clientId), channel);
+      }, this);
 
-        multiClient.del(this._clientMessagesKey(clientId));
+      multiClient.del(this._clientMessagesKey(clientId));
 
-        return [channels, multiClient.exec()];
-      })
-      .spread(function(channels, results) {
-        channels.forEach(function(channel, i) {
-          var result = results[i][1];
-          if (result !== 1) return;
-          this._server.trigger('unsubscribe', clientId, channel);
-          this._server.debug('Unsubscribed client ? from channel ?', clientId, channel);
-        }, this);
+      var results = await multiClient.exec();
 
-        var multi = this._redis.multi();
+      channels.forEach(function(channel, i) {
+        var result = results[i][1];
+        if (result !== 1) return;
+        this._server.trigger('unsubscribe', clientId, channel);
+        this._server.debug('Unsubscribed client ? from channel ?', clientId, channel);
+      }, this);
 
-        channels.forEach(function(channel) {
-          multi.srem(this._channelKey(channel), clientId);
-        }, this);
+      var multi = this._redis.multi();
 
-        multi.zrem(this._clientsKey, clientId);
-        multi.publish(this._closeChannel, clientId);
+      channels.forEach(function(channel) {
+        multi.srem(this._channelKey(channel), clientId);
+      }, this);
 
-        return multi.exec();
-      })
-      .then(function() {
-        this._server.debug('Destroyed client ?', clientId);
-        this._server.trigger('disconnect', clientId);
-      })
-      .nodeify(function(err) {
-        if (err) console.error(err.stack);
-        if (callback) callback.call(context);
-      });
+      multi.zrem(this._clientsKey, clientId);
+      multi.publish(this._closeChannel, clientId);
+
+      await multi.exec();
+
+      this._server.debug('Destroyed client ?', clientId);
+      this._server.trigger('disconnect', clientId);
+    } catch (err) {
+      if (err) console.error(err.stack);
+      throw err;
+    } finally {
+      if (callback) callback.call(context);
+    }
   },
 
-  _updateClientTTL: Promise.method(function(clientId) {
+  _updateClientTTL: function(clientId) {
     var timeout = this._server.timeout;
     if (typeof timeout !== 'number') return;
 
@@ -180,7 +175,7 @@ Engine.prototype = {
 
     this._server.debug('Ping ?, ?', clientId, time);
     return this._redis.zadd(this._clientsKey, time, clientId);
-  }),
+  },
 
   ping: function(clientId) {
     this._updateClientTTL(clientId);
@@ -191,14 +186,17 @@ Engine.prototype = {
         this._redis.sadd(this._clientChannelsKey(clientId), channel),
         this._redis.sadd(this._channelKey(channel), clientId)
       ])
-      .bind(this)
-      .spread(function(added) {
+      .then(([added]) => {
         if (added === 1) this._server.trigger('subscribe', clientId, channel);
         this._server.debug('Subscribed client ? to channel ?', clientId, channel);
       })
-      .nodeify(function(err) {
+      .then(() => {
+        if (callback) callback.call(context);
+      })
+      .catch((err) => {
         if (err) console.error(err.stack);
         if (callback) callback.call(context);
+        throw err;
       });
   },
 
@@ -207,14 +205,17 @@ Engine.prototype = {
         this._redis.srem(this._clientChannelsKey(clientId), channel),
         this._redis.srem(this._channelKey(channel), clientId)
       ])
-      .bind(this)
-      .spread(function(removed) {
+      .then(([removed]) => {
         if (removed === 1) this._server.trigger('unsubscribe', clientId, channel);
         this._server.debug('Unsubscribed client ? from channel ?', clientId, channel);
       })
-      .nodeify(function(err) {
+      .then(() => {
+        if (callback) callback.call(context);
+      })
+      .catch((err) => {
         if (err) console.error(err.stack);
         if (callback) callback.call(context);
+        throw err;
       });
   },
 
@@ -258,8 +259,7 @@ Engine.prototype = {
     multi.del(key);
 
     return multi.exec()
-      .bind(this)
-      .then(function(results) {
+      .then((results) => {
         var jsonMessages = results[0][1];
         if (!jsonMessages) return;
         var messages = jsonMessages.map(function(json) { return JSON.parse(json); });
@@ -267,22 +267,16 @@ Engine.prototype = {
       });
   },
 
-  gc: function() {
+  gc: async function() {
     var timeout = this._server.timeout;
     if (typeof timeout !== 'number') return;
     if (this._disconnected) return;
 
-    return this._withLock('gc', function() {
+    return this._withLock('gc', async function() {
       var cutoff = new Date().getTime() - 1000 * 2 * timeout;
-
-      return this._redis.zrangebyscore(this._clientsKey, 0, cutoff)
-        .bind(this)
-        .then(function(clients) {
-          return Promise.map(clients, function(clientId) {
-            return this.destroyClient(clientId);
-          }.bind(this));
-        });
-    }.bind(this));
+      var clients = await this._redis.zrangebyscore(this._clientsKey, 0, cutoff);
+      await Promise.all(clients.map((clientId) => this.destroyClient(clientId)));
+    }, this);
   },
 
   _withLock: function(lockName, callback, context) {
@@ -291,8 +285,7 @@ Engine.prototype = {
         expiry      = currentTime + this.LOCK_TIMEOUT * 1000 + 1;
 
     return this._redis.setnx(lockKey, expiry)
-      .bind(this)
-      .then(function(set) {
+      .then((set) => {
         if (this._disconnected) return false;
 
         if (set === 1) {
@@ -300,8 +293,7 @@ Engine.prototype = {
         }
 
         return this._redis.get(lockKey)
-          .bind(this)
-          .then(function(timeout) {
+          .then((timeout) => {
             if (this._disconnected) return false;
             if (!timeout) return false;
 
@@ -309,8 +301,7 @@ Engine.prototype = {
             if (currentTime < lockTimeout) return false;
 
             return this._redis.getset(lockKey, expiry)
-              .bind(this)
-              .then(function(oldValue) {
+              .then((oldValue) => {
                 if (this._disconnected) return false;
 
                 if (oldValue !== timeout) return false;
@@ -318,12 +309,16 @@ Engine.prototype = {
               });
           });
       })
-      .then(function(lockObtained) {
+      .then((lockObtained) => {
         if (!lockObtained) return;
 
-        return Promise.try(callback)
-          .bind(this)
-          .finally(function() {
+        var callbackContext = context || this;
+
+        return Promise.resolve()
+          .then(function() {
+            return callback.call(callbackContext);
+          })
+          .finally(() => {
             if (this._disconnected) return;
             if (new Date().getTime() < expiry) this._redis.del(lockKey);
           });
