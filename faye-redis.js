@@ -234,14 +234,10 @@ Engine.prototype = {
         const queue = this._clientMessagesKey(clientId);
         this._server.debug('Queueing for client ?: ?', clientId, message);
 
-        const pipeline = this._redis.pipeline();
+        await this._redis.rpush(queue, jsonMessage);
+        await this._redis.publish(this._messageChannel, clientId);
 
-        pipeline.rpush(queue, jsonMessage);
-        pipeline.publish(this._messageChannel, clientId);
-        pipeline.zscore(this._clientsKey, clientId);
-
-        const res = await pipeline.exec();
-        const clientScore = res[2] && res[2][1];
+        const clientScore = await this._redis.zscore(this._clientsKey, clientId);
 
         if (typeof clientScore !== 'undefined' && (clientScore === null || this._clientExpired(clientScore)))
             await this._redis.del(queue);
